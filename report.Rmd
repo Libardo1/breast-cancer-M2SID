@@ -1,31 +1,300 @@
 ---
-title: "Rapport"
-author: "Max Halford"
-date: "6 May 2017"
+title: "Cancer du sein: facteurs pronostiques de son évolution à long terme"
+author: "Max Halford - Master 2 SID"
+date: "Mai 2017"
 output:
-  tufte::tufte_handout: default
+  tufte::tufte_handout:
+    number_sections: true
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
+\centering
+\raggedright
+\newpage
+\tableofcontents
+\newpage
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+```{r, echo=FALSE, message=FALSE}
+library(dplyr)
+library(ggcorrplot)
+library(ggplot2)
+library(ggthemes)
+library(tidyr)
 ```
 
-## Including Plots
+# Introduction
 
-You can also embed plots, for example:
+# Matériel et méthodes
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+1. Statistiques récapitulatives des données mises à disposition
+2. Préparation des données
+    - Traitement des valeurs manquantes
+    - Extraction de nouvelles variables
+3. Analyses bivariées pour determiner les effets des caractéristiques sur les évènements
+    - Test de Wilcoxon-Mann-Whitney pour les variables continues
+    - Test du $\chi^2$ suivi du calcul du V de Cramér pour les variables discrètes
+4. Modélisation avec une régression logistique avec et sans sélection de variables
+5. Modélisation avec une analyse de survie pour prendre en compte l'aspect longitudinal des données
+6. Récapitulatif des deux modèles
+
+
+# Analyse descriptive
+
+```{r, echo = FALSE}
+cancer <- read.table('data/recepteurs.csv', header = TRUE)
+
+makeFreqTable <- function(var) {
+  tab <- as.data.frame(table(var))
+  tab <- rename(tab, Effectif=Freq)
+  tab$Proportion <- round(tab$Effectif / sum(tab$Effectif), 2)
+  tab <- t(tab)
+  colnames(tab) = tab[1,]
+  tab <- tab[-1,]
+  return(tab)
+}
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{marginfigure}
+Les analyses suivantes se font en ignorant les valeurs manquantes qui seront traitées par la suite.
+```
+
+On a à disposition un jeu de données qui concerne 2257 femmes ayant eu un premier épisode de cancer du sein entre 1974 et 1984. Après le premier épisode, chaque femme a été suivi et on dispose d'un suivi individuel qui peut aller jusqu'au 1er septembre 1993 (dans le cas où la patiente est encore vivante et suivie). Lors du suivi, 4 types d'évènements différents ont été enregistrés:
+
+- *Décés*: la patiente est morte, que ce soit à cause du cancer ou pas.
+- *Métastase*: un cancer du sein est dit métastatique lorsque des cellules cancéreuses issues de la tumeur initiale se sont installées dans un autre organe du corps comme par exemple au niveau des os, des poumons ou du foie.
+- *Récidive*: un nouvel épisode cancéreux a eu lieu dans le même sein que lors de l'épisode initial.
+- *Cancer controlatéral*: le cancer s'est propagé à l'autre sein.
+
+682 des 2257 (30%) patientes sont décédées au cours de leur suivi; il se peut aussi que certaines des patientes perdues de vue soit décédées sans qu'on ne le sache.
+
+Il va de soit que ces évènements ne sont pas indépendants, d'ailleurs en regardant le tableau suivant on s'apercoit que les évènements de décès et de métastases sont liés.
+
+```{r, echo=FALSE}
+cooc <-cancer %>%
+  select(., E_DECES, E_META, E_RECI, E_CONT) %>%
+  as.matrix(.) %>%
+  crossprod(.)
+
+knitr::kable(cooc, caption = 'Co-occurences des évènements (effectifs)')
+cooc_marg <- round(cooc / colSums(cooc), 2)
+knitr::kable(cooc_marg, caption = 'Co-occurences des évènements (fréquences, les lignes somment à 1)')
+```
+
+```{marginfigure}
+Ici on a transposé la matrice des évènements et on l'a multiplié par elle-même ($X^tX$) pour obtenir les co-occurences d'évènements deux à deux.
+```
+
+On constate que 428 des 589 (73%) patientes faisant signe d'une métastate sont décédées; de plus 428 des 682 (63%) patientes décédées étaient atteintes d'une métastase. En d'autres termes le risque de décès pour les patientes atteintes d'une métastate est 2.5 fois plus élevé. Les évènements n'apparaissent pas à la même fréquence (les éléments diagonaux représentent le nombre d'occurences de chaque évènement); cela peut être du au fait qu'un évènement en enclenche un autre mais seulement dans un sens.
+
+```{marginfigure}
+Le risque relatif (RR) de décès en cas de métastate est calculé de la façon suivante: $\frac{P_M(D)}{P_{\bar{M}}(D)} = \frac{0.726}{0.290} = 2.5$
+```
+
+On dispose aussi de la date d'occurence des évènements, on pourra donc par exemple étudier l'ordre d'apparition des évènements au cours du temps ou bien la prévalence du cancer au cours du temps. Lors de la préparation des données il faudra accorder du temps à la manipulation de ces dates, notamment en les convertissant dans un format analysable.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.margin=TRUE}
+qplot(cancer$AGE, geom='histogram') +
+  labs(x = 'Age', y = 'Fréquence absolue', title = "Distribution de variable AGE") +
+  theme_few()
+```
+
+Le reste des variables a été mesuré lors de l'épisode initial du cancer. Lors de cette épisode, les patientes ont en moyennes 58 ans et 1466 (65%) d'entre elles sont ménopausées.
+
+La majeure partie (92%) des cancers des patientes ont été initiallement classifiés comme étant au stade 1 ou 2 (respectivement 34% et 58%) selon la classification de l'UICC  [^1].
+
+[^1]: UICC: Union Internationale Contre le Cancer.
+
+```{r, echo = FALSE}
+knitr::kable(makeFreqTable(cancer$TNM), caption = 'Stade de gravité du cancer')
+```
+
+Quand à la taille de la tumeur primaire, sa distribution fait signe d'une disymétrie à gauche avec une moyenne de 28.9 millimètres. Cette disymétrie vient tout simplement du fait que la taille minimale est de 0.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.margin=TRUE}
+qplot(cancer$TAILLE, geom='histogram') +
+  labs(x = 'Taille', y = 'Fréquence absolue', title = "Distribution de la variable TAILLE") +
+  theme_few()
+```
+
+Les mesures de récepteurs œstrogéniques (RO) et de récepteurs progestéroniques (RP) présents dans la tumeur initiale semblents suivre des distributions exponentielles décroissantes. La mesure RO a une valeur médiane de 37 et une moyenne de 92.65 alors que la mesure RP a une valeur médiane de 14 pour une moyenne de 73.22.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.margin=TRUE}
+qplot(cancer$ROQUANT, geom='histogram') +
+  labs(x = 'Récepteurs ostrogéniques', y = 'Fréquence absolue', title = "Distribution de la variable RO") +
+  theme_few()
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.margin=TRUE}
+qplot(cancer$RPQUANT, geom='histogram') +
+  labs(x = 'Récepteurs progestéroniques', y = 'Fréquence absolue', title = "Distribution de la variable RP") +
+  theme_few()
+```
+
+Si on opère une binarisation de ces quantités de récepteurs en considérant dans les deux cas un seuil de positivité strict de 10 fmol/mg, on obtient les fréquences suivantes. On peut dire que le RO est jugé présent dans 1556 (72%) des cas tandis que le RP l'est dans 1194 (54%) des cas.
+
+```{r, echo = FALSE}
+knitr::kable(makeFreqTable(cancer$ROQUANT > 10), caption = 'Présence du récepteur RO', col.names = c('<= 10', '> 10'))
+```
+
+```{r, echo = FALSE}
+knitr::kable(makeFreqTable(cancer$RPQUANT > 10), caption = 'Présence du récepteur RP', col.names = c('<= 10', '> 10'))
+```
+
+Pour ce qui est du stade histologique de la tumeur de Scarff-Blomm-Richardson (noté SBR), il atteint modalités 3 dont les fréquences sont données dans le tableau suivant. Il y'a 3 stades possibles, le premier étant le meilleur pour la patiente.
+
+```{r, echo = FALSE}
+knitr::kable(makeFreqTable(cancer$SBR), caption = 'Mesure SBR')
+```
+
+De même que pour les quantités de RO et de RP, le nombre de ganglions lymphatiques axillaires (et non pas auxilaires) semble aussi être distribué de façon exponentielle. Ces ganglions peuvent augmenter de volume chez la femme en cas de cancer du sein. Si on effectue un découpage pour donner plus de sens "humain" à cette quantité, on obtient les fréquences suivantes. On constate que le fait d'avoir plus de 3 ganglions est rare puisque cela représente seulement 5% des patientes.
+
+```{r, echo = FALSE}
+decoupage <- function(nbgang) {
+  if (nbgang == 0) {
+    return('Aucun')
+  } else if (nbgang > 0 && nbgang < 4) {
+    return('Entre 1 et 3')
+  } else {
+    return('Plus de 3')
+  }
+}
+
+knitr::kable(makeFreqTable(sapply(na.omit(cancer$NBGANG), decoupage)), caption = 'Nombre de ganglions lymphatiques axillaires')
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.margin=TRUE}
+qplot(cancer$ROQUANT, geom='histogram') +
+  labs(x = 'Ganglions lymphatiques axillaires', y = 'Fréquence absolue', title = "Distribution de la variable NBGANG") +
+  theme_few()
+```
+
+La fréquence de chaque type de chirurgie effectuée sur le premier épisode (abscence, tumorectomie ou mastectomie) est reprėsentė dans le tableau suivant. On constate que 1824 (81%) des patientes ont reçu une chirurgie.
+
+```{r, echo = FALSE}
+knitr::kable(makeFreqTable(cancer$CHIR), caption = 'Type de chirurgie au premier cancer', col.names = c('Abscence', 'Tumorectomie', 'Mastectomie'))
+```
+
+La variable RAD indique si la patiente a poursuivi un traitement par radiothérapie. Il y'en quasiment autant qui en ont suivi qu'il y'en a qui n'en ont pas suivi.
+
+```{r, echo = FALSE}
+knitr::kable(makeFreqTable(cancer$RAD), caption = 'Traitement par radiothérapie', col.names = c('Non', 'Oui'))
+```
+
+
+Enfin, 537 des 637 (79.7%) des patientes décédées le sont à cause du cancer; 413 de ces 537 (76.9%) patientes faisaient signe d'une métastate.
+
+```{r, echo = FALSE}
+cont <- table(select(filter(cancer, E_DECES == 1), E_META, CAUSEDC))
+rownames(cont) = c('Métastate', 'Pas de métastate')
+colnames(cont) = c('Décès cancer', 'Décès autre')
+knitr::kable(cont, caption = 'Raison du décès et lien avec la métastate')
+```
+
+# Préparation des données
+
+Comme il se doit, le jeu de données à disposition étant un jeu de données réel, il contient des valeurs manquantes et abhérrantes.
+
+## Gestion des données manquantes
+
+Tous les évenements n'ont bien heureusement pas de valeurs manquantes. Pour ce qui est des variables explicatives, toutes en ont hélas au moins quelques unes comme on peut le voir sur le graphique suivant. Les lignes sont des observations et les parties blanches correspondent à des valeurs manquantes.
+
+![Matrice des valeurs manquantes](figures/missing_matrix.png)
+
+Il ne paraît pas y avoir de corrélations entre la présence de valeurs manquantes des différentes variables. On peut confirmer cela avec une carte de chaleur qui montre la corrélation des dites valeurs manquantes. Il semble cependant y avoir un lien pour les variables RAD et CHIR, toutefois c'est probablement seulement dû au hasard puisque il n'y a que 7 valeurs nulles pour la variable RAD et 4 pour la variable CHIR.
+
+```{r, echo = FALSE}
+features <- select(cancer, AGE, MENOP, TNM, TAILLE, ROQUANT, RPQUANT, HISTO, SBR, NBGANG, CHIR, RAD, CAUSEDC)
+corr <- cor(is.na(features))
+ggcorrplot(corr, type = 'lower')
+```
+
+
+Pour ce qui est du nombre de valeurs manquantes par ligne, en voici ci-dessous un tableau récapitulatif.
+
+```{r, echo = FALSE}
+knitr::kable(makeFreqTable(rowSums(cancer %>% select(-(CAUSEDC)) %>% is.na(.))), caption = 'Distribution du nombre de valeurs manquantes par observation')
+```
+
+On constate qu'il y'a seulement 27 (1%) d'observations qui ont plus de deux valeurs manquantes et 131 (6%)  qui ont plus d'une. Une majorité de 1696 (75%) observations n'ont pas de valeurs manquantes et 430 (19%). En retirant les observations qui ont plus d'une valeur manquante on garderait 94% des données; de plus en faisant cela les variables MENOP et CHIR n'ont plus de valeurs manquantes. Il y'a aussi 4 patientes dont l'âge indiqué est de 0, on les retire du jeu de données, de cette façon il n'y plus de valeurs manquantes pour la variable AGE. Enfin il y'a une observation qui n'a pas de date de dernières nouvelles, on l'enlève.
+
+Nous avons conservé 2111 (93.6%) des données. On peut maintenant à remplacer les valeurs manquantes. La variable TNM qui représente le stade de gravité du cancer n'a que 6 (~0%) valeurs manquantes et c'est une variable discrète, on peut donc tout simplement remplacer les valeurs manquantes par le mode de la distribution qui est 2. On peut appliquer ce même processus pour les variables HISTO, SBR et RAD qui sont aussi des variables discrètes et ont respectivement 2, 2 et 3 valeurs manquantes.
+
+Le reste des variables avec des valeurs manquantes sont toutes des variables continues avec la caractéristique qu'elles font toutes signe d'une disymétrie. On va donc remplacer les valeurs manquantes de chaque par sa médiane respective pour éviter de trop prendre en compter les valeurs extrêmes. Ceci concerne 4 variables qui sont TAILLE, ROQUANT, RPQUANT et NBGANG et qui ont respectivement 29 (1.3%), 59 (2.7%), 22 (1%), 124 (5.8%) valeurs manquantes.
+
+## Extraction de nouvelles variables
+
+Avant de développer des modèles on va extraire de nouvelles variables. On va aussi remanier le jeu de données pour le faciliter les modélisations qui vont suivre.
+
+Tout d'abord on définit l'évènement "disease-free" comme étant le cas où aucun des évènements indiqués n'a lieu. Il y'a 1161 (55%) des observations où c'est le cas.
+
+En prochaine étape on "applatit" (en anglais *melt*) le jeu de données pour avoir une vision plus "chronologique" des données. Cela est plus simple à comprendre en comparant les deux tableaux suivants.
+
+
+| IDENT | E_DECES | E_META | D_DECES  | D_META   | D_DN     | ROQUANT |
+|-------|---------|--------|----------|----------|----------|---------|
+| 1     | 1       | 1      | 07/01/90 | 18/01/90 | 18/01/90 | 22      |
+| 2     | 0       | 0      | NULL     | NULL     | 16/01/90 | 19      |
+| 3     | 1       | 0      | 18/10/83 | NULL     | 18/10/83 | 0       |
+
+Table: Partie du jeu de donneés initial
+
+| IDENT | EVENEMENT | DATE     | OCCURENCE | ROQUANT |
+|-------|-----------|----------|-----------|---------|
+| 1     | E_DECES   | 07/01/90 | 1         | 22      |
+| 1     | E_META    | 18/01/90 | 1         | 22      |
+| 1     | E_DECES   | 16/01/90 | 0         | 19      |
+| 1     | E_META    | 16/01/90 | 0         | 19      |
+| 3     | E_DECES   | 18/10/83 | 1         | 0       |
+| 3     | E_META    | 18/10/83 | 0         | 0       |
+
+Table: Version "applatie" du tableau précédent
+
+On indique par si un évènement a eu lieu (1) ou pas (0) dans la colonne OCCURRENCE. On utilise la date de dernière nouvelles comme date pour les non-occurrences d'évènements. Cette façon de faire fait que l'on obtient un tableau avec $2111 \times 5$ = 10556 observations (5 évènements par patiente).
+
+En applatissant le jeu de données on se rend que quelques évènements de décès n'ont pas de cause associée (8), on remplace les valeurs manquantes par la modalité la plus fréquente qui est 1 (indiquant que le décès est liė au cancer).
+
+Maintenant que le jeu données comporte une colonne DATE, il est trivial de calculer la différence en jours entre la date du premier évènement cancéreux et la date d'occurrence des divers évènements. On peut aussi extraire l'année de chaque date, ceci sera possiblement informatif puisque on peut supposer que la qualité des traitements reçus s'améliore avec le temps. Enfin, même si on a applatit le jeu de données on peut converser les occurrences d'évènements en indiquant si oui (1) ou non (0) un évènement antécédant a eu lieu. Concrètement on aura trois variables booléennes indiquant si oui ou un certain type d'évènement a eu lieu avant l'ėvènement observé; ces trois colonnes sont E_META, E_RECI et E_CONT. Il n'y a pas besoin de garder E_DECES puisque étant le dernier évènement qui a lieu il ne peut pas aider à expliquer l'occurrence d'autres évènements, au contraire du reste des évènements.
+
+Au final on a 18 variables explicatives qui sont en ordre alphabétique:
+
+- AGE
+- CAUSEDC (qui ne peut que être utilisé dans le cas de l'évènement de décès)
+- CHIR
+- D_FIRST_YEAR
+- DATE_YEAR
+- DIFF_JOURS
+- E_CONT
+- E_META
+- E_RECI
+- HISTO
+- MENOP
+- NBGANG
+- RAD
+- ROQUANT
+- RPQUANT
+- SBR
+- TAILLE
+- TNM
+
+A côté de ça nous avons 3 colonnes qui serviront à contruire, possiblement, des modèles séparées. Celles-ci sont:
+
+- IDENT
+- DATE
+- EVENEMENT
+
+Enfin la variable réponse OCCURRENCE permet de savoir si ou non un évènement a eu lieu.
+
+
+# Analyse bivariées
+
+```{r, echo = FALSE}
+cancer <- read.csv('data/recepteurs_v3.csv', header = TRUE)
+```
+
+# Modélisations
+
+# Modélisation longitudinale par des méthodes d'analyse de survie
+

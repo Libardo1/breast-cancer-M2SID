@@ -3,3 +3,6 @@
 .Rprofile
 packrat/lib*/
 packrat/src/
+*.pyc
+data/recepteurs_*.csv
+figures/
