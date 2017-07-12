@@ -11,9 +11,15 @@ cancer = pd.read_csv('data/recepteurs_v2.csv')
 cancer['E_DF'] = (cancer[['E_DECES', 'E_META', 'E_RECI', 'E_CONT']].sum(axis='columns') == 0)
 cancer['E_DF'] = cancer['E_DF'].astype(int)
 
+# Create a column for each kind of death
+
+cancer['E_SURVIE'] = (cancer['E_DECES'] == 0).astype(int)
+cancer['E_DECES_CANCER'] = (cancer['CAUSEDC'] == 1).astype(int)
+cancer['E_DECES_AUTRE'] = (cancer['CAUSEDC'] == 3).astype(int)
+
 # Melt dataframe to get events
 
-event_cols = ['E_DECES', 'E_META', 'E_RECI', 'E_CONT', 'E_DF']
+event_cols = ['E_SURVIE', 'E_DECES_CANCER', 'E_DECES_AUTRE', 'E_META', 'E_RECI', 'E_CONT', 'E_DF']
 
 cancer_2 = pd.melt(
     cancer,
@@ -27,7 +33,7 @@ cancer_2 = pd.melt(
 
 def get_date_of_event(row):
     """For each type of event get the corresponding event date"""
-    if row['EVENEMENT'] == 'E_DECES':
+    if row['EVENEMENT'] in ('E_SURVIE', 'E_DECES_CANCER', 'E_DECES_AUTRE'):
         return row['D_DECES']
     elif row['EVENEMENT'] == 'E_META':
         return row['D_META']
@@ -44,11 +50,11 @@ cancer_2['DATE'].fillna(cancer_2['D_DN'], inplace=True)
 
 cancer_3 = cancer_2[(cancer_2['DATE'].notnull())].copy()
 
-# Get features for indicating co-occurrent events
+# Get features for indicating co-occurrent events (doesn't apply for death events)
 
-cancer_3['E_META'] = ((cancer_3['D_META'].notnull()) & (cancer_3['D_META'] <= cancer_3['D_FIRST'])).astype(int)
-cancer_3['E_RECI'] = ((cancer_3['D_RECI'].notnull()) & (cancer_3['D_RECI'] <= cancer_3['D_FIRST'])).astype(int)
-cancer_3['E_CONT'] = ((cancer_3['D_CONT'].notnull()) & (cancer_3['D_META'] <= cancer_3['D_FIRST'])).astype(int)
+cancer_3['E_META'] = ((cancer_3['D_META'].notnull()) & (cancer_3['D_META'] < cancer_3['DATE'])).astype(int)
+cancer_3['E_RECI'] = ((cancer_3['D_RECI'].notnull()) & (cancer_3['D_RECI'] < cancer_3['DATE'])).astype(int)
+cancer_3['E_CONT'] = ((cancer_3['D_CONT'].notnull()) & (cancer_3['D_CONT'] < cancer_3['DATE'])).astype(int)
 
 # Convert dates to datetimes
 
@@ -76,23 +82,17 @@ def get_days_diff(row):
 
 cancer_3['DIFF_JOURS'] = cancer_3.apply(get_days_diff, axis='columns')
 
-# Fill null death causes
-
-most_occurring_death_event = cancer_3['CAUSEDC'].value_counts().idxmax()
-
-def fill_death_cause(row):
-    if not np.isnan(row['CAUSEDC']):
-        return row['CAUSEDC']
-    elif row['EVENEMENT'] == 'E_DECES':
-        return most_occurring_death_event
-    return 0
-
-cancer_3['CAUSEDC'] = cancer_3.apply(fill_death_cause, axis='columns')
-
 # Remove the unnecessary columns
 
-cols_to_drop = ['D_DECES', 'D_META', 'D_RECI', 'D_CONT', 'D_DN', 'D_FIRST']
+cols_to_drop = ['D_DECES', 'D_META', 'D_RECI', 'D_CONT', 'D_DN', 'D_FIRST', 'CAUSEDC', 'E_DECES']
 cancer_3.drop(cols_to_drop, axis='columns', inplace=True)
+
+# Convert float types to integers
+
+cancer_3['MENOP'] = cancer_3['MENOP'].astype(int)
+cancer_3['HISTO'] = cancer_3['HISTO'].astype(int)
+cancer_3['CHIR'] = cancer_3['CHIR'].astype(int)
+cancer_3['RAD'] = cancer_3['RAD'].astype(int)
 
 # Save the final dataframe
 

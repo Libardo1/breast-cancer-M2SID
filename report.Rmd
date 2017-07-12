@@ -18,10 +18,15 @@ knitr::opts_chunk$set(echo = TRUE)
 \newpage
 
 ```{r, echo=FALSE, message=FALSE}
+library(caret)
 library(dplyr)
 library(ggcorrplot)
 library(ggplot2)
 library(ggthemes)
+library(lsr) # For calculating Cramér's V
+library(survival)
+library(splines)
+library(survminer)
 library(tidyr)
 ```
 
@@ -35,7 +40,7 @@ library(tidyr)
     - Extraction de nouvelles variables
 3. Analyses bivariées pour determiner les effets des caractéristiques sur les évènements
     - Test de Wilcoxon-Mann-Whitney pour les variables continues
-    - Test du $\chi^2$ suivi du calcul du V de Cramér pour les variables discrètes
+    - Test du $\chi^2$ suivi du calcul du $V$ de Cramér pour les variables discrètes
 4. Modélisation avec une régression logistique avec et sans sélection de variables
 5. Modélisation avec une analyse de survie pour prendre en compte l'aspect longitudinal des données
 6. Récapitulatif des deux modèles
@@ -220,7 +225,7 @@ knitr::kable(makeFreqTable(rowSums(cancer %>% select(-(CAUSEDC)) %>% is.na(.))),
 
 On constate qu'il y'a seulement 27 (1%) d'observations qui ont plus de deux valeurs manquantes et 131 (6%)  qui ont plus d'une. Une majorité de 1696 (75%) observations n'ont pas de valeurs manquantes et 430 (19%). En retirant les observations qui ont plus d'une valeur manquante on garderait 94% des données; de plus en faisant cela les variables MENOP et CHIR n'ont plus de valeurs manquantes. Il y'a aussi 4 patientes dont l'âge indiqué est de 0, on les retire du jeu de données, de cette façon il n'y plus de valeurs manquantes pour la variable AGE. Enfin il y'a une observation qui n'a pas de date de dernières nouvelles, on l'enlève.
 
-Nous avons conservé 2111 (93.6%) des données. On peut maintenant à remplacer les valeurs manquantes. La variable TNM qui représente le stade de gravité du cancer n'a que 6 (~0%) valeurs manquantes et c'est une variable discrète, on peut donc tout simplement remplacer les valeurs manquantes par le mode de la distribution qui est 2. On peut appliquer ce même processus pour les variables HISTO, SBR et RAD qui sont aussi des variables discrètes et ont respectivement 2, 2 et 3 valeurs manquantes.
+Nous avons conservé 2111 (93.6%) observations. On peut maintenant à remplacer les valeurs manquantes. La variable TNM qui représente le stade de gravité du cancer n'a que 6 (~0%) valeurs manquantes et c'est une variable discrète, on peut donc tout simplement remplacer les valeurs manquantes par le mode de la distribution qui est 2. On peut appliquer ce même processus pour les variables HISTO, SBR et RAD qui sont aussi des variables discrètes et ont respectivement 2, 2 et 3 valeurs manquantes.
 
 Le reste des variables avec des valeurs manquantes sont toutes des variables continues avec la caractéristique qu'elles font toutes signe d'une disymétrie. On va donc remplacer les valeurs manquantes de chaque par sa médiane respective pour éviter de trop prendre en compter les valeurs extrêmes. Ceci concerne 4 variables qui sont TAILLE, ROQUANT, RPQUANT et NBGANG et qui ont respectivement 29 (1.3%), 59 (2.7%), 22 (1%), 124 (5.8%) valeurs manquantes.
 
@@ -252,16 +257,24 @@ Table: Partie du jeu de donneés initial
 
 Table: Version "applatie" du tableau précédent
 
-On indique par si un évènement a eu lieu (1) ou pas (0) dans la colonne OCCURRENCE. On utilise la date de dernière nouvelles comme date pour les non-occurrences d'évènements. Cette façon de faire fait que l'on obtient un tableau avec $2111 \times 5$ = 10556 observations (5 évènements par patiente).
+
+Pour ce qui est des évènements on en distingue 7:
+
+- E_DECES_CANCER: la patiente est décédée à cause du cancer
+- E_DECES_AUTRE: la patiente est décédée pour une raison autre que le cancer
+- E_META: apparition de métastates
+- E_RECI: récidive locale
+- E_CONT: cancer controlatéral
+- E_DF: la patiente a fait d'aucun évènement listé précedemment
+- E_SURVIE: la patiente a survécu à la data d'observation
 
 En applatissant le jeu de données on se rend que quelques évènements de décès n'ont pas de cause associée (8), on remplace les valeurs manquantes par la modalité la plus fréquente qui est 1 (indiquant que le décès est liė au cancer).
 
 Maintenant que le jeu données comporte une colonne DATE, il est trivial de calculer la différence en jours entre la date du premier évènement cancéreux et la date d'occurrence des divers évènements. On peut aussi extraire l'année de chaque date, ceci sera possiblement informatif puisque on peut supposer que la qualité des traitements reçus s'améliore avec le temps. Enfin, même si on a applatit le jeu de données on peut converser les occurrences d'évènements en indiquant si oui (1) ou non (0) un évènement antécédant a eu lieu. Concrètement on aura trois variables booléennes indiquant si oui ou un certain type d'évènement a eu lieu avant l'ėvènement observé; ces trois colonnes sont E_META, E_RECI et E_CONT. Il n'y a pas besoin de garder E_DECES puisque étant le dernier évènement qui a lieu il ne peut pas aider à expliquer l'occurrence d'autres évènements, au contraire du reste des évènements.
 
-Au final on a 18 variables explicatives qui sont en ordre alphabétique:
+Au final on a 17 variables explicatives:
 
 - AGE
-- CAUSEDC (qui ne peut que être utilisé dans le cas de l'évènement de décès)
 - CHIR
 - D_FIRST_YEAR
 - DATE_YEAR
@@ -288,13 +301,312 @@ A côté de ça nous avons 3 colonnes qui serviront à contruire, possiblement, 
 Enfin la variable réponse OCCURRENCE permet de savoir si ou non un évènement a eu lieu.
 
 
-# Analyse bivariées
+# Statistiques bivariées
+
+On peut d'abord commencer à résumer l'influence de chaque variable sur l'occurrence d'un évènement, et ceci pour chaque évènement. Pour les 10 variables continues on peut calculer la $p$-valeur donné par le test de Wilcoxon-Mann-Whitney; l'avantage d'utiliser ce test est qu'il est non-paramétrique et donc qu'on a pas à, par exemple, supposer que nos données proviennent d'une distribution normale. En ce qui concerne les 7 variables catégoriques on peut effectuer un simple test du $chi^2$ pour déterminer la présence de "lien"; on peut ensuite calculer le $V$ de Cramér pour déterminer l'intensité de ce lien. Evidemment le $V$ de Cramér a seulement du sens si le test du $\chi^2$ est significatif. Le $V$ de Cramér varie de 0 à 1 et exprime une certaine corrélation entre deux variable catégoriques.
 
 ```{r, echo = FALSE}
-cancer <- read.csv('data/recepteurs_v3.csv', header = TRUE)
+colClasses <- c(
+  'MENOP'='factor',
+  'HISTO'='factor',
+  'CHIR'='factor',
+  'RAD'='factor',
+  'E_META'='factor',
+  'E_RECI'='factor',
+  'E_CONT'='factor'
+)
+
+cancer <- read.csv('data/recepteurs_v3.csv', header = TRUE, colClasses = colClasses)
 ```
 
-# Modélisations
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+summarizeEvents <- function(events) {
+  # Remove variables that are not explanatory ones
+  factors <- select(events, -c(EVENEMENT, DATE, IDENT))
+  
+  num_p_values <- c()
+  fac_p_values <- c()
+  fac_cramer_vs <- c()
+  
+  for (col in names(select(factors, -OCCURRENCE))) {
+    
+    if (class(factors[, col]) == 'factor') {
+      # Create contingency table
+      cont <- table(factors[, col], factors$OCCURRENCE)
+      # Calculate p-value
+      chi_test <- chisq.test(cont)
+      fac_p_values[col] <- chi_test$p.value
+      # Calculate Cramér's V
+      fac_cramer_vs[col] <- cramersV(cont)
+    } else {
+      occurences <- filter(factors, OCCURRENCE == 1)
+      nonOccurences <- filter(factors, OCCURRENCE == 0)
+      test <- wilcox.test(x=occurences[, col], y=nonOccurences[, col])
+      num_p_values[col] <- test$p.value
+    }
+  
+  }
+  
+  return (list(num=num_p_values, fac=fac_p_values, cramer=fac_cramer_vs))
+}
 
-# Modélisation longitudinale par des méthodes d'analyse de survie
+p_values_deces_cancer <- summarizeEvents(filter(cancer, EVENEMENT == 'E_DECES_CANCER'))
+p_values_deces_other <- summarizeEvents(filter(cancer, EVENEMENT == 'E_DECES_AUTRE'))
+p_values_meta <- summarizeEvents(filter(cancer, EVENEMENT == 'E_META'))
+p_values_reci <- summarizeEvents(filter(cancer, EVENEMENT == 'E_RECI'))
+p_values_cont <- summarizeEvents(filter(cancer, EVENEMENT == 'E_CONT'))
+p_values_df <- summarizeEvents(filter(cancer, EVENEMENT == 'E_DF'))
+p_values_survie <- summarizeEvents(filter(cancer, EVENEMENT == 'E_SURVIE'))
 
+p_values_num <- data.frame(
+  p_values_deces_cancer$num,
+  p_values_deces_other$num,
+  p_values_meta$num,
+  p_values_reci$num,
+  p_values_cont$num,
+  p_values_df$num,
+  p_values_survie$num
+)
+
+p_values_fac <- data.frame(
+  p_values_deces_cancer$fac,
+  p_values_deces_other$fac,
+  p_values_meta$fac,
+  p_values_reci$fac,
+  p_values_cont$fac,
+  p_values_df$fac,
+  p_values_survie$fac
+)
+
+cramer_vs <- data.frame(
+  p_values_deces_cancer$cramer,
+  p_values_deces_other$cramer,
+  p_values_meta$cramer,
+  p_values_reci$cramer,
+  p_values_cont$cramer,
+  p_values_df$cramer,
+  p_values_survie$cramer
+)
+
+cols <- c('Décès cancer', 'Décès autre', 'Méta', 'Reci', 'Cont', 'Disease-free', 'Survie')
+
+colnames(p_values_num) <- cols
+colnames(p_values_fac) <- cols
+colnames(cramer_vs) <- cols
+```
+
+## Variables continues
+
+```{r, echo = FALSE}
+knitr::kable(round(p_values_num, 3), caption = '$p$-valeurs des tests de Wilcoxon-Mann-Whitney')
+```
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+calculateAveragesByOcurrence <- function(events) {
+  averages <- events %>%
+    group_by(OCCURRENCE) %>%
+    summarise(
+      AGE = mean(AGE),
+      TNM = mean(TNM),
+      TAILLE = mean(TAILLE),
+      ROQUANT = mean(ROQUANT),
+      RPQUANT = mean(RPQUANT),
+      SBR = mean(SBR),
+      NBGANG = mean(NBGANG),
+      DATE_YEAR = mean(DATE_YEAR),
+      D_FIRST_YEAR = mean(D_FIRST_YEAR),
+      DIFF_JOURS = mean(DIFF_JOURS)
+    )
+  averages.t <- t(averages)
+  colnames(averages.t) <- c(0, 1)
+  averages.t <- averages.t[-1,]
+  return(averages.t)
+}
+```
+
+Il semble que toutes les variables continues aient un effect significatif sur le décès lié au cancer. Le tableau suivant montre les moyennes de chaque variable selon que le décès lié au cancer ait eu lieu (1) ou pas (0). Les $p$-valeurs disponibles ci-dessus indiquent si ces moyennes sont significativement différentes ou pas.
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+avgs <- calculateAveragesByOcurrence(cancer %>% filter(., EVENEMENT == 'E_DECES_CANCER'))
+knitr::kable(round(avgs, 2), caption = 'Moyennes des variables continues pour les décès liés au cancer')
+```
+
+Les patientes décèdées sont en moyenne 30 mois plus âgées lors de l'apparition du cancer. Comme on peut s'y attendre, e stade de leur cancer est plus élevé, la taille tumeur primaire est plus élevée d'un demi-centimètre. Quand au récepteurs, la quantité RO est plus élevée alors que la quantité RP est plus basse. Le grade histologique de la tumeur est plus élevé et le nombre de ganglions est trois plus élevé. Enfin les patientes sont mortes en moyenne 5 années après la survenue du premier épisode.
+
+Pour ce qui est des décès qui ne sont pas liés au cancer, les variables relatives au premier cancer ne sont pas significatives (c'est à dire les variables TAILLE, ROQUANT, RPQUANT, SBR et NBGANG). On voit que les variables liés aux années sont encore très significatives, ceci est du au fait que lorsqu'un un patient meurt un évènement est enregistré. La variable DATE_YEAR et DIFF_JOURS est très explicative puisque toutes les patientes ont commencé à être suivies la première année, cependant comme cette variable n'est pas disponible lors de l'arrivée du premier cancer on ne peut pas s'en servir pour faire de la prédiction. La variable DIFF_JOURS est tout simplement la différence entre DATE_YEAR et D_FIRST_YEAR, puisque D_FIRST_YEAR reste stable DIFF_JOURS aura donc la même puissance explicative que DATE_YEAR. En apprentissage machine on dit que les variables DATE_YEAR et DIFF_JOURS "leak" (en français "fuient") de l'information. Tout dépend de comment est posée la question à laquelle on veut répondre; si la date de l'évènement alors on peut utiliser cette information puisque les évènements de décès arrivent plus vite que la moyenne, si dans l'autre cas on nous demande la probabilité de décès lors de la survenue du premier cancer on ne peut pas utiliser ces variables.
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+avgs <- calculateAveragesByOcurrence(cancer %>% filter(., EVENEMENT == 'E_DECES_AUTRE'))
+knitr::kable(round(avgs, 2), caption = 'Moyennes des variables continues pour les décès non liés au cancer')
+```
+
+En ce qui concerne l'apparition de métastates, mis à part la variables ROQUANT, toutes les autres semblent être liés. Il se peut que ceci soit du au fait que la métastate appairaisse en même temps que le cancer et que par enchaînement toutes les variables soient liées aux deux types d'évènements. D'autant plus que sur le tableau suivant on constate que les variations de moyennes observées pour les cancers sont les mêmes que pour la métastase. Seulement la variable AGE a une moyenne plus faible. 
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+avgs <- calculateAveragesByOcurrence(cancer %>% filter(., EVENEMENT == 'E_META'))
+knitr::kable(round(avgs, 2), caption = 'Moyennes des variables continues pour les métastates')
+```
+
+Pour ce qui est de la récidive, seulement les variables AGE, TAILLE, SBR, DATE_YEAR et DIFF_JOURS semblent être explicatives. Les patientes atteintes d'un premier cancer à un âge ont plus de chance d'avoir une récidive, de même que les patientes avec une large première tumeur. 
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+avgs <- calculateAveragesByOcurrence(cancer %>% filter(., EVENEMENT == 'E_RECI'))
+knitr::kable(round(avgs, 2), caption = 'Moyennes des variables continues pour les récidives')
+```
+
+Les cancers controlatéraux, quand à eux, semblent survenir dès que le stade du cancer est plus faible, que l'âge est bas et la quantité de récepteurs progestéroniques est élevée.
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+avgs <- calculateAveragesByOcurrence(cancer %>% filter(., EVENEMENT == 'E_CONT'))
+knitr::kable(round(avgs, 2), caption = 'Moyennes des variables continues pour les cancers controlatéraux')
+```
+
+Toutes les variables sauf ROQUANT semblents affecter l'évènement "disease-free".
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+avgs <- calculateAveragesByOcurrence(cancer %>% filter(., EVENEMENT == 'E_DF'))
+knitr::kable(round(avgs, 2), caption = "Moyennes des variables continues pour l'évènement disease-free")
+```
+
+De même que pour les évènements de décès liés au cancer, toutes les variables sont liées à la survie des patientes.
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+avgs <- calculateAveragesByOcurrence(cancer %>% filter(., EVENEMENT == 'E_SURVIE'))
+knitr::kable(round(avgs, 2), caption = 'Moyennes des variables continues pour la survie')
+```
+
+## Variables catégoriques
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+knitr::kable(round(p_values_fac, 3), caption = '$p$-valeurs des tests du $\\chi^2$')
+knitr::kable(round(cramer_vs, 3), caption = '$V$s de Cramér')
+```
+
+La ménopause semble être significativement lié au décès dus au cancer, en effet des 489 patientes mortes à causes du cancer, 352 (71.98%) ont atteint la ménopause alors que 1022 des 1622 (63%) patientes qui ne sont pas mortes à cause du cancer l'ont atteinte. En lieu de faire le détail ici, on pourra résumer l'importance des variables avec les odds ratios obtenus avec la régression logistique dans la partie suivante.
+
+
+
+# Régression logistique
+
+On peut procéder à une régression logistique pour estimer la puissance prédictive de nos variables. De plus, on peut faire cela pour chacun des types d'évènements dont on dispose. Pour obtenir une estimation qui soit un tant soi peu proche du monde réel, on peut effectuer une validation croisée avec 10 plis. Pour estimer la performance des différentes logistiques mises en place on peut utiliser l'aire sous la courbe ROC (qu'on dénote ROC AUC) puisque celle-ci mesure la capacité à ordonner les observations selon la probabilité d'obtenir un 1, ceci reflète un cas réel qui serait de prioriser les soins patientes selon leur probabilité de mourir (en termes hospitaliers faire du *triage*).
+
+Si on veut prédire le fait de décéder à cause du cancer, on obtient une ROC AUC de moyenne 0.852 avec un écart-type insignifiant. En calculant l'exponentielle de chaque coefficient dans la régression logistique on obtient les odds ratios.
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+ctrl <- trainControl(method='cv', number=10, classProbs=TRUE)
+cancer$y <- ifelse(cancer$OCCURRENCE == 0, 'No', 'Yes')
+
+X <- select(filter(cancer, EVENEMENT == 'E_SURVIE'), -c(DATE, EVENEMENT, IDENT, OCCURRENCE))
+model <- train(y ~ ., data=X, method='glm', family='binomial', trControl=ctrl, metric='ROC')
+
+coeffs <- data.frame(exp(coef(model$finalModel)))
+colnames(coeffs) <- c('Odds ratio')
+knitr::kable(coeffs, caption = 'Odds ratios pour prédire la survie des patientes')
+```
+
+On constate que le fait d'avoir eu une métastate permet beaucoup de prédire si une patiente va survivre ou pas. En effet, 1438 des 1492 (96%) patientes qui ont survécu n'ont pas eu de métastate. En effet il faut faire attention en interprétant le tableau précédent: on prédit la probabilité de survivre et donc avoir un odds ratio inférieur à 1 veut dire que plus variable est élevée, plus la chance de survie augmente. Par exemple pour l'âge de la patiente, chaque année en plus réduit les chances de survie d'environ 5%.
+
+
+
+# Analyse de survie
+
+## Objectif
+
+On veut maintenant étudier l'arrivée d'évènements, notamment la mort des patientes, au cours du temps. Le format du jeu de données actuel ne nécessite pas de changements puisqu'il indique, pour chaque observation, le type d'évènement, l'occurrence ou non et la date d'observation.
+
+## Estimation de la survie globale
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+events <- filter(cancer, EVENEMENT == 'E_SURVIE')
+events$OCCURRENCE <- 1 - (as.numeric(events$OCCURRENCE) - 1)
+fits <- survfit(Surv(events$DIFF_JOURS, events$OCCURRENCE) ~ 1)
+```
+
+Puisqu'on nos données sont censurées (à droite), on peut estimer la probabilité de mourir au cours du temps avec l'estimateur de Kaplan-Meier. Dans le cas où on connaitrait la date de décès de chaque patiente on aurait simplement à calculer une fonction de survie de façon déterministe. On peut afficher la proportion de personnes en vie au cours dans un tableau.
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+format_survival_table <- function(fits) {
+  steps <- rev(seq(0, 1, by=0.05))
+  indexes <- c()
+  for (step in steps) {
+    indexes <- c(indexes, which.min(abs(fits$surv - step)))
+  }
+  
+  summary_fits <- data.frame(
+    data = cbind(
+      fits$time[indexes],
+      fits$surv[indexes],
+      fits$std.err[indexes],
+      fits$lower[indexes],
+      fits$upper[indexes])
+  )
+  colnames(summary_fits) <- c("Jours", "Taux de survie", "Erreur standard", "IC 95% inf", "IC 95% sup")
+  summary_fits <- summary_fits[!duplicated(summary_fits),]
+  return(summary_fits)
+}
+
+summary_fits <- format_survival_table(fits)
+knitr::kable(summary_fits, caption = 'Evolution du taux de survie au cours du temps')
+```
+
+On constate que cela un moins de 10 ans pour que 30% des patientes soient mortes. On peut aussi représenter cette évolution à l'aide d'une courbe de survie.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+attach(events)
+ggsurvplot(fits, break.time.by = 1825, xlab = 'Temps en jours', ylab = 'P(Survie)')
+```
+
+On constate bien que les patientes ne meurent pas brutalement. Plus on avance dans le temps et moins l'estimation du taux de survie est fiable, ceci étant du à la réduction du nombre d'observations.
+
+
+## Estimation de la survie suivant un facteur
+
+On peut estimer la probabilité de survie des patientes au cours du temps dans plusieurs groupes disjoints. On peut définir ces groupes à partir d'une ou plusieurs variables discrètes.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+fits_meta <- survfit(Surv(events$DIFF_JOURS, events$OCCURRENCE) ~ events$E_META)
+
+ggsurvplot(fits_meta, 
+           break.time.by = 1825,
+           xlab = 'Temps en jours', ylab = 'P(Survie)',
+           # in legend of risk table.
+           surv.median.line = "hv",  # add the median survival pointer.
+           legend.labs = c("Pas de métastate", "Métastase"),    # change legend labels.
+           palette =  c("#FF5A5F", "#FFB400")
+)
+```
+
+On voit bien que la probabilité de survie décroît beaucoup plus au cours du temps si une patiente a eu une métastate. En effet, seulement 50% des patientes qui ont une métastate survivent au bout de 5 années, alors que 90% des patientes qui ne sont pas atteintes d'une métastate survivent.
+
+On peut tracer une courbe similaire pour le type de chirurgie reçu.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+fits_chir <- survfit(Surv(events$DIFF_JOURS, events$OCCURRENCE) ~ events$CHIR)
+
+ggsurvplot(fits_chir, 
+           break.time.by = 1825,
+           xlab = 'Temps en jours', ylab = 'P(Survie)',
+           # in legend of risk table.
+           surv.median.line = "hv",  # add the median survival pointer.
+           legend.labs = c("Abscence", "Tumorectomie", "Mastectomie"),    # change legend labels.
+           palette =  c("#FF5A5F", "#FFB400", "#007A87")
+)
+```
+
+Ici on voit que les patientes qui se sont vu retirer leur tumeur via une tumorectomie ont une plus grande chance de survivre au cours. La mastectomie ne semble pas avoir d'effet sur la probabilité de survie avant 10 années, cependant après les patientes ayant eu une mastectomie survivent mieux.
+
+
+## Tests log-rank
+
+A vu d'oeil on peut plus ou moins deviner si une variable a un effet sur le taux de survie. Une démarche plus rigoureuse consiste à faire recours à test statistique pour conclure. Le test log-rank permet justement de comparer des fonctions de survie de façon non-paramétrique. Intuitivement l'idée est de comparer le nombre d'évènements attendus à chaque pas de temps $t$ entre les différents groupes formés à partir d'une variable. L'hypothèse nulle est que la probabilité de survie dans chaque groupe est la même à chaque pas de temps $t$.
+
+Si on prend en compte la présence antérieure d'une métastase, on rejette l'hypothèse nulle et on conclut ce qu'on a vu graphiquement. On peut effectuer ce test pour chaque variable catégorique et garder celles pour lesquelles on rejette l'hypothèse nulle avec $\alpha = 0.05$. Il se trouve que le test est seulement rejeté pour la variable HISTO où la $p$-valeur est de 0.09.
+
+
+# Conclusion
+
+Durant la phase de pré-traitement nous avons géré les valeurs manquantes et nous avons créé de nouvelles variables, notamment temporelles. De plus, nous avons normalisé les données pour pouvoir étudier l'effet des variables sur différentes variables de façon aisée. Ce travail préliminaire a permis de gagner beaucoup de temps par la suite.
+
+En premier lieu nous avons examiner la distribution des variable de façon univariée, de plus nous avons pris le temps de mesurer la co-occurrence des différents types d'évènements. Ensuite nous avons effectué des analyses bivariées à travers des tests statistiques pour pouvoir mesurer l'impact des variables sur les différents types d'évènements. Nous avons aussi effectué une régression logistique pour obtenir les odds-ratios associés à chaque variable.
+
+Enfin, l'analyse de survie a confirmé les observations faites grâce aux tests précédents. L'avantage certain de cette approche est de pouvoir chiffrer le taux de survie au fur et à mesure du temps. Cependant, il est moins pratique d'inclure plusieurs variables comme on l'aurait fait dans une régression sur le nombre de jours jusqu'à la mort. De plus, la prise en compte de variable continues nécessite de discrétiser ces dites variables et donc de perdre un peu d'information.
